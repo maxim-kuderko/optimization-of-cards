@@ -13,7 +13,7 @@
   "author": "Moonactive",
   "license": "ISC",
   "dependencies": {
-    "fastify": "^3.29.0",
-    "redis": "^4.0.1"
+    "redis": "^4.0.1",
+    "turbo-http": "^0.3.2"
   }
 }

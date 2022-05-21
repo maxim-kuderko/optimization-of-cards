@@ -1,63 +1,88 @@
 const fs = require('fs');
-const fastify = require('fastify')()
-const http = require("http");
+const turbo = require('turbo-http');
 
 const port = +process.argv[2] || 3000
 
 const client = require('redis').createClient()
+
 client.on('error', (err) => console.log('Redis Client Error', err));
 
+let totalNodes = new Promise(async (resolve) => {
+    const subscriber = client.duplicate();
+    await subscriber.connect();
+    await subscriber.subscribe('total-nodes', async (message) => {
+        resolve(message)
+        await subscriber.disconnect()
+    });
+})
+let nodeId
+
+
+const cardsData = fs.readFileSync('./cards.json');
+const cards = JSON.parse(cardsData).map(card=>Buffer.from('{"id":"' + card.id + '","name":"' + card.name + '"}'));
+
+const users={}
+const usersFinished={}
+let nodes=2
+let declared=false
+
+const allCards = Buffer.from('{"id": "ALL CARDS"}');
+const ready = Buffer.from('{"ready": true}');
+const requestListener = async (req, res) => {
+    if (req.url.startsWith('/r')) {
+        await new Promise(r => setTimeout(r, 420));//grace period to make sure all services are known
+        client.publish('total-nodes',await client.get('total-nodes'))
+
+        res.setHeader('Content-Length', ready.length)
+        res.write(ready);
+    } else {
+        if(!declared){
+            nodes=await totalNodes
+            declared=true
+        }
+        const key = req.url.substring(13)
+        if(usersFinished[key] || nodeId>nodes){
+            res.setHeader('Content-Length', allCards.length)
+            res.write(allCards)
+            return
+        }
+
+
+        const top = Math.floor(nodeId * (cards.length/nodes)) // not included
+
+
+        if(!users[key]){
+            users[key] =  Math.floor((nodeId-1)*(cards.length/nodes))
+        }
+
+        let result = ++users[key]
+
+        if(result>top) {
+            usersFinished[key]=true
+            res.setHeader('Content-Length', allCards.length)
+            res.write(allCards)
+            return
+        }
+
+        const card = cards[result-1]
+        res.setHeader('Content-Length', card.length)
+        res.write(card);
+    }
+};
+const server = turbo.createServer(requestListener);
 
 const start = async () => {
     try {
-        console.log(`Example app listening at http://0.0.0.0:${port}`)
-        await fastify.listen(port)
+        console.log("Listening on "+ port)
+        nodeId= await client.INCR('total-nodes')
+        server.listen(port);
+
+        // await fastify.listen(port)
     } catch (err) {
-        fastify.log.error(err)
+        //fastify.log.error(err)
         process.exit(1)
     }
 }
 client.on('ready', start)
-
-const cardsData = fs.readFileSync('./cards.json');
-const cards = JSON.parse(cardsData);
-fastify.get('/ready', async (request, reply) => {
-    return { ready: true }
-})
-const parsedUUIDs={}
-const usersFinished={}
-fastify.get('/card_add', async (request, reply) => {
-    if(usersFinished[request.query.id]){
-        reply.sent = true
-        reply.raw.end('{"id":"ALL CARDS"}')
-        return
-    }
-
-    // This magic will reduce the uuid into a shorter buffer to reduce network traffic
-    let key
-    if(!(key = parsedUUIDs[request.query.id])){
-        key=parsedUUIDs[request.query.id]=Buffer.from(request.query.id.replace(/\-/g,''),'hex')
-    }
-    // No idea if it's better but it seems to be on the lucky side of tests
-    result = await client.sendCommand(['INCR',key])
-    if(result>cards.length) {
-        usersFinished[request.query.id]=true
-        reply.sent = true
-        reply.raw.end('{"id":"ALL CARDS"}')
-        return
-    }
-
-    const card = cards[result-1]
-    reply.sent = true
-    // Manulally creating json for maximum efficiency, += string concat is the fastest way to do it
-    let res='{"id":"'
-    res+=card.id
-    res+='","name":"'
-    res+=card.name
-    res+='"}'
-    reply.raw.end(res)
-})
-
-
 
 client.connect();
